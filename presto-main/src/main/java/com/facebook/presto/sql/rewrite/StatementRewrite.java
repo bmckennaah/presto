@@ -19,6 +19,7 @@ import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.sql.analyzer.QueryExplainer;
 import com.facebook.presto.sql.parser.SqlParser;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.NodeRef;
 import com.facebook.presto.sql.tree.Parameter;
@@ -54,9 +55,11 @@ public final class StatementRewrite
             AccessControl accessControl,
             WarningCollector warningCollector)
     {
+        OptTrace.begin(session.getOptTrace(), "rewrite");
         for (Rewrite rewrite : REWRITES) {
             node = requireNonNull(rewrite.rewrite(session, metadata, parser, queryExplainer, node, parameters, parameterLookup, accessControl, warningCollector), "Statement rewrite returned null");
         }
+        OptTrace.end(session.getOptTrace(), "rewrite");
         return node;
     }
 

@@ -15,7 +15,9 @@ package com.facebook.presto.cost;
 
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
+import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.PlanNode;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
 import com.facebook.presto.sql.planner.iterative.Lookup;
@@ -24,6 +26,7 @@ import com.facebook.presto.sql.planner.iterative.Memo;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static com.facebook.presto.SystemSessionProperties.isEnableStatsCalculator;
 import static com.facebook.presto.SystemSessionProperties.isIgnoreStatsCalculatorFailures;
@@ -58,6 +61,32 @@ public final class CachingStatsProvider
         this.types = requireNonNull(types, "types is null");
     }
 
+    private static int filteringNodeCnt(PlanNode planNode, Lookup lookUp)
+    {
+        int cnt = 0;
+
+        if (planNode instanceof GroupReference) {
+            GroupReference groupReference = (GroupReference) planNode;
+            Stream<PlanNode> planNodes = lookUp.resolveGroup(groupReference);
+            Optional<PlanNode> groupPlanNode = planNodes.findFirst();
+            if (groupPlanNode.isPresent()) {
+                PlanNode firstPlanNode = groupPlanNode.get();
+                cnt = filteringNodeCnt(firstPlanNode, lookUp);
+            }
+        }
+        else {
+            if (planNode instanceof FilterNode) {
+                ++cnt;
+            }
+
+            for (PlanNode source : planNode.getSources()) {
+                cnt += filteringNodeCnt(source, lookUp);
+            }
+        }
+
+        return cnt;
+    }
+
     @Override
     public PlanNodeStatsEstimate getStats(PlanNode node)
     {
@@ -78,6 +107,12 @@ public final class CachingStatsProvider
             }
 
             stats = statsCalculator.calculateStats(node, this, lookup, session, types);
+
+            PlanNodeStatsEstimate constraintStats = OptTrace.stats(session.getOptTrace(), node, stats);
+            if (constraintStats != null) {
+                stats = constraintStats;
+            }
+
             verify(cache.put(node, stats) == null, "Stats already set");
             return stats;
         }
@@ -102,6 +137,13 @@ public final class CachingStatsProvider
 
         PlanNodeStatsEstimate groupStats = statsCalculator.calculateStats(memo.getNode(group), this, lookup, session, types);
         verify(!memo.getStats(group).isPresent(), "Group stats already set");
+
+        PlanNode node = memo.getNode(group);
+        PlanNodeStatsEstimate constraintStats = OptTrace.stats(session.getOptTrace(), node, groupStats);
+        if (constraintStats != null) {
+            groupStats = constraintStats;
+        }
+
         memo.storeStats(group, groupStats);
         return groupStats;
     }

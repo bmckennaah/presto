@@ -16,6 +16,7 @@ package com.facebook.presto.sql.planner.iterative.rule;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.relational.ProjectNodeUtils;
 import com.google.common.collect.ImmutableSet;
@@ -48,6 +49,7 @@ public class RemoveRedundantIdentityProjections
     @Override
     public Result apply(ProjectNode project, Captures captures, Context context)
     {
+        OptTrace.msg(context.getOptTrace(), "Removing redundant identity projection (node id %s)", true, project.getId().getId());
         return Result.ofPlanNode(project.getSource());
     }
 }

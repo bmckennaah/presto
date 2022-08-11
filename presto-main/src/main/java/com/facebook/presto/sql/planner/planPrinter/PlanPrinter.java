@@ -56,6 +56,7 @@ import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.InterpretedFunctionInvoker;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.Partitioning;
 import com.facebook.presto.sql.planner.PartitioningScheme;
 import com.facebook.presto.sql.planner.PlanFragment;
@@ -518,6 +519,15 @@ public class PlanPrinter
 
             node.getSortExpressionContext(functionAndTypeManager)
                     .ifPresent(sortContext -> nodeOutput.appendDetails("SortExpression[%s]", formatter.apply(sortContext.getSortExpression())));
+
+            if (session.getOptTrace().isPresent()) {
+                OptTrace optTrace = session.getOptTrace().get();
+                OptTrace.Pair<String, String> joinStrings = optTrace.getJoinStrings(node);
+                node.getSortExpressionContext(functionAndTypeManager)
+                        .ifPresent(sortContext -> nodeOutput.appendDetailsLine(""));
+                nodeOutput.appendDetailsLine("Join order: %s", joinStrings.getKey());
+            }
+
             node.getLeft().accept(this, context);
             node.getRight().accept(this, context);
 
@@ -551,6 +561,13 @@ public class PlanPrinter
             if (!node.getDynamicFilters().isEmpty()) {
                 nodeOutput.appendDetails(getDynamicFilterAssignments(node));
             }
+
+            if (session.getOptTrace().isPresent()) {
+                OptTrace optTrace = session.getOptTrace().get();
+                OptTrace.Pair<String, String> joinStrings = optTrace.getJoinStrings(node);
+                nodeOutput.appendDetailsLine("Join order: %s", joinStrings.getKey());
+            }
+
             node.getSource().accept(this, context);
             node.getFilteringSource().accept(this, context);
 

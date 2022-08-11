@@ -23,6 +23,7 @@ import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.sql.planner.OptTrace;
 
 import java.util.Optional;
 
@@ -61,6 +62,23 @@ public interface Rule<T>
         WarningCollector getWarningCollector();
 
         Optional<LogicalPropertiesProvider> getLogicalPropertiesProvider();
+
+        default Optional<OptTrace> getOptTrace()
+        {
+            Optional<OptTrace> optTrace = null;
+            Session session = this.getSession();
+
+            if (session != null) {
+                optTrace = session.getOptTrace();
+            }
+
+            return optTrace;
+        }
+
+        default Memo getMemo()
+        {
+            return null;
+        }
     }
 
     final class Result

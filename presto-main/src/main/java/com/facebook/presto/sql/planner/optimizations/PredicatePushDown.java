@@ -41,6 +41,7 @@ import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.EffectivePredicateExtractor;
 import com.facebook.presto.sql.planner.EqualityInference;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.RowExpressionVariableInliner;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.VariablesExtractor;
@@ -134,15 +135,20 @@ public class PredicatePushDown
     @Override
     public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
+        OptTrace.begin(session.getOptTrace(), "PredicatePushDown::optimize");
+        OptTrace.trace(session.getOptTrace(), plan, 0, "Initial plan :");
         requireNonNull(plan, "plan is null");
         requireNonNull(session, "session is null");
         requireNonNull(types, "types is null");
         requireNonNull(idAllocator, "idAllocator is null");
 
-        return SimplePlanRewriter.rewriteWith(
+        PlanNode rewrittenPlanNode = SimplePlanRewriter.rewriteWith(
                 new Rewriter(variableAllocator, idAllocator, metadata, effectivePredicateExtractor, sqlParser, session),
                 plan,
                 TRUE_CONSTANT);
+        OptTrace.trace(session.getOptTrace(), rewrittenPlanNode, 0, "Final plan :");
+        OptTrace.end(session.getOptTrace(), "PredicatePushDown::optimize");
+        return rewrittenPlanNode;
     }
 
     public static RowExpression createDynamicFilterExpression(String id, RowExpression input, FunctionAndTypeManager functionAndTypeManager)
@@ -537,6 +543,18 @@ public class PredicatePushDown
             if (dynamicFilterEnabled && !equiJoinClausesUnmodified) {
                 leftSource = context.rewrite(wrapInProjectIfNeeded(node.getLeft(), leftProjections.build()), leftPredicate);
                 rightSource = context.rewrite(wrapInProjectIfNeeded(node.getRight(), rightProjections.build()), rightPredicate);
+
+                if (session.getOptTrace().isPresent() && leftSource instanceof ProjectNode) {
+                    ProjectNode tmpProjectNode = (ProjectNode) leftSource;
+                    boolean useless = tmpProjectNode.getOutputVariables().equals(tmpProjectNode.getSource().getOutputVariables());
+                    OptTrace.msg(session.getOptTrace(), "Useless left project? : %s", true, useless ? "true" : "false");
+                }
+
+                if (session.getOptTrace().isPresent() && rightSource instanceof ProjectNode) {
+                    ProjectNode tmpProjectNode = (ProjectNode) rightSource;
+                    boolean useless = tmpProjectNode.getOutputVariables().equals(tmpProjectNode.getSource().getOutputVariables());
+                    OptTrace.msg(session.getOptTrace(), "Useless right project? : %s", true, useless ? "true" : "false");
+                }
             }
             else {
                 leftSource = context.rewrite(node.getLeft(), leftPredicate);
@@ -575,6 +593,18 @@ public class PredicatePushDown
                                 .addAll(rightSource.getOutputVariables())
                                 .build().containsAll(node.getOutputVariables()),
                         "JoinNode predicate pushdown incorrect : Left and right source are not producing original JoinNode output variables");
+
+                if (session.getOptTrace().isPresent() && leftSource instanceof ProjectNode) {
+                    ProjectNode tmpProjectNode = (ProjectNode) leftSource;
+                    boolean useless = tmpProjectNode.getOutputVariables().equals(tmpProjectNode.getSource().getOutputVariables());
+                    OptTrace.msg(session.getOptTrace(), "Useless left project? : %s", true, useless ? "true" : "false");
+                }
+
+                if (session.getOptTrace().isPresent() && rightSource instanceof ProjectNode) {
+                    ProjectNode tmpProjectNode = (ProjectNode) rightSource;
+                    boolean useless = tmpProjectNode.getOutputVariables().equals(tmpProjectNode.getSource().getOutputVariables());
+                    OptTrace.msg(session.getOptTrace(), "Useless right project? : %s", true, useless ? "true" : "false");
+                }
 
                 // if the distribution type is already set, make sure that changes from PredicatePushDown
                 // don't make the join node invalid.
@@ -694,11 +724,11 @@ public class PredicatePushDown
                 VariableReferenceExpression probeSymbol = clause.getLeft();
                 VariableReferenceExpression buildSymbol = clause.getRight();
                 clausesBuilder.add(call(
-                                    EQUAL.name(),
-                                    functionAndTypeManager.resolveOperator(EQUAL, fromTypes(probeSymbol.getType(), buildSymbol.getType())),
-                                    BOOLEAN,
-                                    probeSymbol,
-                                    buildSymbol));
+                        EQUAL.name(),
+                        functionAndTypeManager.resolveOperator(EQUAL, fromTypes(probeSymbol.getType(), buildSymbol.getType())),
+                        BOOLEAN,
+                        probeSymbol,
+                        buildSymbol));
             }
 
             for (RowExpression filter : joinFilter) {
@@ -717,11 +747,11 @@ public class PredicatePushDown
                         if (function.equals(BETWEEN.name()) && arguments.get(0) instanceof VariableReferenceExpression) {
                             if (arguments.get(1) instanceof VariableReferenceExpression) {
                                 CallExpression callExpression = call(
-                                                                    GREATER_THAN_OR_EQUAL.name(),
-                                                                    functionAndTypeManager.resolveOperator(GREATER_THAN_OR_EQUAL, fromTypes(arguments.get(0).getType(), arguments.get(1).getType())),
-                                                                    BOOLEAN,
-                                                                    arguments.get(0),
-                                                                    arguments.get(1));
+                                        GREATER_THAN_OR_EQUAL.name(),
+                                        functionAndTypeManager.resolveOperator(GREATER_THAN_OR_EQUAL, fromTypes(arguments.get(0).getType(), arguments.get(1).getType())),
+                                        BOOLEAN,
+                                        arguments.get(0),
+                                        arguments.get(1));
                                 Optional<CallExpression> comparisonExpression = getDynamicFilterComparison(node, callExpression, functionAndTypeManager);
                                 if (comparisonExpression.isPresent()) {
                                     clausesBuilder.add(comparisonExpression.get());
@@ -729,11 +759,11 @@ public class PredicatePushDown
                             }
                             if (arguments.get(2) instanceof VariableReferenceExpression) {
                                 CallExpression callExpression = call(
-                                                                    LESS_THAN_OR_EQUAL.name(),
-                                                                    functionAndTypeManager.resolveOperator(LESS_THAN_OR_EQUAL, fromTypes(arguments.get(0).getType(), arguments.get(2).getType())),
-                                                                    BOOLEAN,
-                                                                    arguments.get(0),
-                                                                    arguments.get(2));
+                                        LESS_THAN_OR_EQUAL.name(),
+                                        functionAndTypeManager.resolveOperator(LESS_THAN_OR_EQUAL, fromTypes(arguments.get(0).getType(), arguments.get(2).getType())),
+                                        BOOLEAN,
+                                        arguments.get(0),
+                                        arguments.get(2));
                                 Optional<CallExpression> comparisonExpression = getDynamicFilterComparison(node, callExpression, functionAndTypeManager);
                                 if (comparisonExpression.isPresent()) {
                                     clausesBuilder.add(comparisonExpression.get());
@@ -802,11 +832,11 @@ public class PredicatePushDown
                 return Optional.empty();
             }
             return Optional.of(call(
-                                operator.name(),
-                                functionAndTypeManager.resolveOperator(operator, fromTypes(left.getType(), right.getType())),
-                                BOOLEAN,
-                                left,
-                                right));
+                    operator.name(),
+                    functionAndTypeManager.resolveOperator(operator, fromTypes(left.getType(), right.getType())),
+                    BOOLEAN,
+                    left,
+                    right));
         }
 
         private static DynamicFiltersResult createDynamicFilters(

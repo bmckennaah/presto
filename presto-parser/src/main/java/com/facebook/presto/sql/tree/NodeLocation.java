@@ -31,6 +31,7 @@ public final class NodeLocation
 
     public int getColumnNumber()
     {
-        return charPositionInLine + 1;
+        //return charPositionInLine + 1;
+        return charPositionInLine;
     }
 }

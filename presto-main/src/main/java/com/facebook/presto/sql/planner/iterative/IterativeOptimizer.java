@@ -31,6 +31,7 @@ import com.facebook.presto.spi.eventlistener.PlanOptimizerInformation;
 import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.PlannerUtils;
 import com.facebook.presto.sql.planner.RuleStatsRecorder;
 import com.facebook.presto.sql.planner.TypeProvider;
@@ -46,6 +47,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import static com.facebook.presto.SystemSessionProperties.isEnableOptimizerTrace;
 import static com.facebook.presto.SystemSessionProperties.isVerboseOptimizerInfoEnabled;
 import static com.facebook.presto.common.RuntimeUnit.NANO;
 import static com.facebook.presto.spi.StandardErrorCode.OPTIMIZER_TIMEOUT;
@@ -120,6 +122,7 @@ public class IterativeOptimizer
         Matcher matcher = new PlanNodeMatcher(lookup);
 
         Duration timeout = SystemSessionProperties.getOptimizerTimeout(session);
+
         StatsProvider statsProvider = new CachingStatsProvider(
                 statsCalculator,
                 Optional.of(memo),
@@ -128,8 +131,13 @@ public class IterativeOptimizer
                 TypeProvider.viewOf(variableAllocator.getVariables()));
         CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.of(memo), session);
         Context context = new Context(memo, lookup, idAllocator, variableAllocator, System.nanoTime(), timeout.toMillis(), session, warningCollector, costProvider, statsProvider, metadata, types);
+
+        context.allocOptTrace("/tmp");
+        OptTrace.assignTraceIds(session.getOptTrace(), context.memo.getNode(memo.getRootGroup()), null);
+
         boolean planChanged = exploreGroup(memo.getRootGroup(), context, matcher);
         context.collectOptimizerInformation();
+
         if (!planChanged) {
             return plan;
         }
@@ -139,6 +147,7 @@ public class IterativeOptimizer
 
     private boolean exploreGroup(int group, Context context, Matcher matcher)
     {
+        OptTrace.begin(context.session.getOptTrace(), "exploreGroup : group %d", group);
         // tracks whether this group or any children groups change as
         // this method executes
         boolean progress = exploreNode(group, context, matcher);
@@ -154,12 +163,16 @@ public class IterativeOptimizer
             }
         }
 
+        OptTrace.end(context.session.getOptTrace(), "exploreGroup : group %s , progress %s", group, progress ? "true" : "false");
+
         return progress;
     }
 
     private boolean exploreNode(int group, Context context, Matcher matcher)
     {
         PlanNode node = context.memo.getNode(group);
+        OptTrace.begin(context.session.getOptTrace(), "exploreNode : group %d , node id %s , %s",
+                group, node.getId().getId(), node.getClass().getSimpleName());
 
         boolean done = false;
         boolean progress = false;
@@ -179,6 +192,8 @@ public class IterativeOptimizer
                     continue;
                 }
 
+                OptTrace.msg(context.session.getOptTrace(), "Next enabled rule : %s", true, rule.getClass().getSimpleName());
+
                 Rule.Result result = transform(node, rule, matcher, context);
 
                 if (result.getTransformedPlan().isPresent()) {
@@ -193,14 +208,34 @@ public class IterativeOptimizer
                             transformedNode = transformedNode.assignStatsEquivalentPlanNode(node.getStatsEquivalentPlanNode());
                         }
                     }
+
+                    if (context.session.getOptTrace().isPresent()) {
+                        OptTrace optTrace = context.session.getOptTrace().get();
+                        optTrace.begin("Memo.replace (applied rule %s)", rule.getClass().getSimpleName());
+                        optTrace.msg("Old node : group %s , node id %s , %s", true,
+                                group, node.getId(), node.getClass().getSimpleName());
+                        optTrace.tracePlanNode(node, 1, "", 1, null);
+                        optTrace.traceMemo();
+                        optTrace.msg("group %s node id %s ===========> group %s new node %s", true, group, node.getId(), group, transformedNode.getId());
+                        optTrace.tracePlanNode(transformedNode, 1, "", 1, null);
+                    }
+
                     context.addRulesTriggered(rule.getClass().getSimpleName(), node, transformedNode);
                     node = context.memo.replace(group, transformedNode, rule.getClass().getName());
+
+                    OptTrace.msg(context.session.getOptTrace(), "New node : group %s , node id %s , %s", true,
+                            group, node.getId(), node.getClass().getSimpleName());
+
+                    OptTrace.end(context.session.getOptTrace(), "Memo.replace(applied rule %s)", rule.getClass().getSimpleName());
 
                     done = false;
                     progress = true;
                 }
             }
         }
+
+        OptTrace.end(context.session.getOptTrace(), "exploreNode : group %s , node id %s , %s",
+                group, node.getId().getId(), node.getClass().getSimpleName());
 
         return progress;
     }
@@ -209,16 +244,23 @@ public class IterativeOptimizer
     {
         Rule.Result result;
 
+        OptTrace.begin(context.session.getOptTrace(), "transform");
+
         Match<T> match = matcher.match(rule.getPattern(), node);
 
         if (match.isEmpty()) {
+            OptTrace.msg(context.session.getOptTrace(), "no match : rule %s", true, rule.getClass().getSimpleName());
+            OptTrace.end(context.session.getOptTrace(), "transform");
             return Rule.Result.empty();
         }
 
         long duration;
         try {
             long start = System.nanoTime();
+            OptTrace.begin(context.session.getOptTrace(), "rule.apply : %s", rule.getClass().getSimpleName());
             result = rule.apply(match.value(), match.captures(), ruleContext(context));
+            OptTrace.end(context.session.getOptTrace(), "rule.apply : %s , applied? %s", rule.getClass().getSimpleName(),
+                    result.isEmpty() ? "false" : "true");
             duration = System.nanoTime() - start;
         }
         catch (RuntimeException e) {
@@ -229,6 +271,8 @@ public class IterativeOptimizer
         if (SystemSessionProperties.isVerboseRuntimeStatsEnabled(context.session)) {
             context.session.getRuntimeStats().addMetricValue(String.format("rule%sTimeNanos", rule.getClass().getSimpleName()), NANO, duration);
         }
+
+        OptTrace.end(context.session.getOptTrace(), "transform");
 
         return result;
     }
@@ -249,6 +293,8 @@ public class IterativeOptimizer
         boolean progress = false;
 
         PlanNode expression = context.memo.getNode(group);
+        OptTrace.begin(context.session.getOptTrace(), "exploreChildren : group %s , node id %s , %s",
+                group, expression.getId().getId(), expression.getClass().getSimpleName());
         for (PlanNode child : expression.getSources()) {
             checkState(child instanceof GroupReference, "Expected child to be a group reference. Found: " + child.getClass().getName());
 
@@ -256,6 +302,9 @@ public class IterativeOptimizer
                 progress = true;
             }
         }
+
+        OptTrace.end(context.session.getOptTrace(), "exploreChildren : group %s , node id %s , %s , progress ? %s",
+                group, expression.getId().getId(), expression.getClass().getSimpleName(), progress ? "true" : "false");
 
         return progress;
     }
@@ -316,6 +365,12 @@ public class IterativeOptimizer
             public Optional<LogicalPropertiesProvider> getLogicalPropertiesProvider()
             {
                 return logicalPropertiesProvider;
+            }
+
+            @Override
+            public Memo getMemo()
+            {
+                return context.memo;
             }
         };
     }
@@ -430,6 +485,19 @@ public class IterativeOptimizer
                 rulesTriggered.stream().filter(x -> x.getNewNode().isPresent()).forEach(x -> session.getOptimizerResultCollector().addOptimizerResult(x.getRule(), x.getOldNode().get(), x.getNewNode().get()));
             }
             rulesApplicable.forEach(x -> session.getOptimizerInformationCollector().addInformation(new PlanOptimizerInformation(x, false, Optional.of(true), Optional.empty())));
+        }
+
+        public void allocOptTrace(String dirPath)
+        {
+            if (session != null && isEnableOptimizerTrace(session)) {
+                if (!(session.getOptTrace().isPresent())) {
+                    session.setOptTrace(Optional.of(new OptTrace(dirPath, null, session, null, null, lookup, memo,
+                            costProvider, statsProvider)));
+                }
+                else {
+                    session.getOptTrace().ifPresent(optTrace -> optTrace.reinitialize(lookup, memo, costProvider, statsProvider));
+                }
+            }
         }
     }
 }

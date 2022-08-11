@@ -17,6 +17,7 @@ import com.facebook.presto.spi.plan.FilterNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.spi.plan.ProjectNode;
+import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
@@ -60,6 +61,11 @@ public class JoinGraph
     public static List<JoinGraph> buildFrom(PlanNode plan)
     {
         return buildFrom(plan, Lookup.noLookup());
+    }
+
+    public static List<JoinGraph> buildFromWithLookup(PlanNode plan, Lookup lookup)
+    {
+        return buildFrom(plan, lookup);
     }
 
     /**
@@ -178,6 +184,127 @@ public class JoinGraph
             }
             builder.append("\n");
         }
+
+        return builder.toString();
+    }
+
+    private String getNodeName(PlanNode planNode, Lookup lookup, List<JoinGraph> joinGraphList)
+    {
+        String str;
+
+        if (planNode instanceof GroupReference) {
+            str = getNodeName(lookup.resolve(planNode), lookup, joinGraphList);
+        }
+        else if (planNode instanceof TableScanNode) {
+            TableScanNode tableScanNode = (TableScanNode) planNode;
+            str = tableScanNode.getTable().getConnectorHandle().toString();
+            String token = new String("tableName=");
+            int startPos = str.indexOf(token);
+            if (startPos != -1) {
+                startPos += token.length();
+                int endPos = str.indexOf(",", startPos);
+
+                if (endPos != -1) {
+                    str = str.substring(startPos, endPos);
+                }
+            }
+
+            PlanNodeId id = planNode.getId();
+
+            str = str + "_" + id;
+        }
+        else {
+            List<JoinGraph> inputJoinGraphs = findInputJoinGraphs(planNode, joinGraphList, lookup);
+            str = planNode.getClass().getSimpleName();
+
+            PlanNodeId id = planNode.getId();
+
+            str = str + "_" + id;
+
+            for (JoinGraph joinGraph : inputJoinGraphs) {
+                str = str + "_G" + joinGraph.rootId;
+            }
+        }
+
+        return str;
+    }
+
+    private void doIndent(StringBuilder stringBuilder, int indentCnt)
+    {
+        for (int i = 0; i < indentCnt; ++i) {
+            stringBuilder.append(" ");
+        }
+    }
+
+    private static PlanNode findByPlanId(PlanNode currentPlanNode, PlanNodeId planNodeId, Lookup lookup)
+    {
+        PlanNode foundPlanNode = null;
+        if (currentPlanNode.getId() == planNodeId) {
+            foundPlanNode = currentPlanNode;
+        }
+        else {
+            currentPlanNode = lookup.resolve(currentPlanNode);
+            for (PlanNode source : currentPlanNode.getSources()) {
+                foundPlanNode = findByPlanId(source, planNodeId, lookup);
+                if (foundPlanNode != null) {
+                    break;
+                }
+            }
+        }
+
+        return foundPlanNode;
+    }
+
+    private static List<JoinGraph> findInputJoinGraphs(PlanNode planNode, List<JoinGraph> joinGraphList, Lookup lookup)
+    {
+        List<JoinGraph> inputJoinGraphs = new ArrayList<>();
+
+        for (PlanNode source : planNode.getSources()) {
+            boolean matched = false;
+            for (JoinGraph joinGraph : joinGraphList) {
+                if (source.getId() == joinGraph.rootId) {
+                    inputJoinGraphs.add(joinGraph);
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (!matched) {
+                if (source instanceof GroupReference) {
+                    source = lookup.resolve(source);
+                }
+
+                List<JoinGraph> sourceJoinGraphs = findInputJoinGraphs(source, joinGraphList, lookup);
+                inputJoinGraphs.addAll(sourceJoinGraphs);
+            }
+        }
+
+        return inputJoinGraphs;
+    }
+
+    public String toStringWithNames(int indentCnt, Lookup lookup, List<JoinGraph> joinGraphList, PlanNode rootNode)
+    {
+        StringBuilder builder = new StringBuilder();
+
+        doIndent(builder, indentCnt);
+
+        builder.append(format("graph_%s {\n", this.rootId));
+        for (PlanNode nodeFrom : nodes) {
+            doIndent(builder, indentCnt + 2);
+            builder.append(getNodeName(nodeFrom, lookup, joinGraphList)).append("\n");
+        }
+
+        for (PlanNode nodeFrom : nodes) {
+            for (Edge nodeTo : edges.get(nodeFrom.getId())) {
+                doIndent(builder, indentCnt + 2);
+                builder.append(getNodeName(nodeFrom, lookup, joinGraphList)).append("--")
+                        .append(getNodeName(nodeTo.getTargetNode(), lookup, joinGraphList)).append("\n");
+            }
+        }
+
+        builder.append("\n");
+        doIndent(builder, indentCnt);
+        builder.append("}");
 
         return builder.toString();
     }

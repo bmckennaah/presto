@@ -25,6 +25,7 @@ import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.JoinReorderingStrategy;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.optimizations.joins.JoinGraph;
 import com.facebook.presto.sql.planner.plan.JoinNode;
@@ -73,17 +74,46 @@ public class EliminateCrossJoins
     @Override
     public Result apply(JoinNode node, Captures captures, Context context)
     {
+        if (context.getOptTrace().isPresent()) {
+            OptTrace optTrace = context.getOptTrace().get();
+            optTrace.begin("EliminateCrossJoins::apply");
+            OptTrace.Pair<String, String> joinStrings = optTrace.getJoinStrings(node);
+            optTrace.msg("Original join string : " + joinStrings.getKey() + ")", true);
+            optTrace.msg("Original constraint : " + joinStrings.getValue() + " (join id " + optTrace.getJoinId(node) + ")", true);
+
+            if (optTrace.satisfiesAnyJoinConstraint(node)) {
+                OptTrace.msg(context.getOptTrace(), "Join matches a join constraint. Returning.", true);
+                OptTrace.end(context.getOptTrace(), "EliminateCrossJoins::apply");
+                return Result.empty();
+            }
+        }
+
         JoinGraph joinGraph = JoinGraph.buildShallowFrom(node, context.getLookup());
+
         if (joinGraph.size() < 3) {
+            OptTrace.msg(context.getOptTrace(), "Join graph size < 3. Returning.", true);
+            OptTrace.end(context.getOptTrace(), "EliminateCrossJoins::apply");
             return Result.empty();
         }
 
         List<Integer> joinOrder = getJoinOrder(joinGraph);
+
         if (isOriginalOrder(joinOrder)) {
+            OptTrace.msg(context.getOptTrace(), "Join order is original order. Returning.", true);
+            OptTrace.end(context.getOptTrace(), "EliminateCrossJoins::apply");
             return Result.empty();
         }
 
         PlanNode replacement = buildJoinTree(node.getOutputVariables(), joinGraph, joinOrder, context.getIdAllocator());
+
+        if (context.getOptTrace().isPresent()) {
+            OptTrace optTrace = context.getOptTrace().get();
+            OptTrace.Pair<String, String> joinStrings = optTrace.getJoinStrings(replacement);
+            optTrace.msg("Final join string : " + joinStrings.getKey() + ")", true);
+            optTrace.msg("Final constraint : " + joinStrings.getValue() + " (join id " + optTrace.getJoinId(replacement) + ")", true);
+            optTrace.end("EliminateCrossJoins::apply");
+        }
+
         return Result.ofPlanNode(replacement);
     }
 

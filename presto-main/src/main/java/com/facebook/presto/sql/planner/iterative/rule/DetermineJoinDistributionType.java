@@ -25,6 +25,7 @@ import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.JoinDistributionType;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.iterative.Lookup;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher;
@@ -87,6 +88,10 @@ public class DetermineJoinDistributionType
 
     public static boolean isBelowMaxBroadcastSize(JoinNode joinNode, Context context)
     {
+        if (OptTrace.satisfiesAnyJoinConstraint(context.getOptTrace(), joinNode)) {
+            return true;
+        }
+
         DataSize joinMaxBroadcastTableSize = getJoinMaxBroadcastTableSize(context.getSession());
 
         PlanNode buildSide = joinNode.getRight();

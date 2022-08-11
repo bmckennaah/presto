@@ -19,11 +19,16 @@ import com.facebook.presto.spi.plan.LogicalProperties;
 import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.Multiset;
 
 import javax.annotation.Nullable;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -297,6 +302,89 @@ public class Memo
         private void assignStatsEquivalentPlanNode(Optional<PlanNode> statsEquivalentPlanNode)
         {
             membership = membership.assignStatsEquivalentPlanNode(statsEquivalentPlanNode);
+        }
+    }
+
+    public void trace(String fileName)
+    {
+        BufferedWriter bufferedWriter = null;
+        try {
+            if (fileName != null) {
+                bufferedWriter = new BufferedWriter(new PrintWriter(fileName));
+            }
+            else {
+                bufferedWriter = new BufferedWriter(new OutputStreamWriter(System.out));
+            }
+        }
+        catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        trace(bufferedWriter, 0);
+    }
+    public void trace(BufferedWriter bufferedWriter, int indentCnt)
+    {
+        try {
+            OptTrace.doIndent(bufferedWriter, indentCnt);
+            bufferedWriter.write("***** MEMO *****");
+
+            for (int i = 0; i < this.getGroupCount(); ++i) {
+                bufferedWriter.newLine();
+                if (groups.containsKey(i)) {
+                    Group group = this.getGroup(i);
+                    PlanNode planNode = group.membership;
+                    OptTrace.doIndent(bufferedWriter, indentCnt + 2);
+                    bufferedWriter.write(String.format("Group %s :", i));
+                    bufferedWriter.newLine();
+                    OptTrace.doIndent(bufferedWriter, indentCnt + 4);
+                    bufferedWriter.write("Incoming references {");
+
+                    int j = 0;
+                    for (Integer ref : group.incomingReferences) {
+                        if (j > 0) {
+                            bufferedWriter.write(", ");
+                        }
+                        bufferedWriter.write(ref.toString());
+
+                        ++j;
+                    }
+
+                    bufferedWriter.write("}");
+                    bufferedWriter.newLine();
+
+                    OptTrace.doIndent(bufferedWriter, indentCnt + 4);
+                    bufferedWriter.write(String.format("Node %s : %s -> {", planNode.getId().getId(), planNode.getClass().getSimpleName()));
+
+                    j = 0;
+                    for (PlanNode source : planNode.getSources()) {
+                        if (j > 0) {
+                            bufferedWriter.write(", ");
+                        }
+
+                        if (source instanceof GroupReference) {
+                            GroupReference groupReference = (GroupReference) source;
+                            bufferedWriter.write(String.format("Group ref %s", groupReference.getGroupId()));
+                        }
+                        else {
+                            bufferedWriter.write(String.format("Node id %s", source.getId().getId()));
+                        }
+
+                        ++j;
+                    }
+
+                    bufferedWriter.write("}");
+                }
+                else {
+                    OptTrace.doIndent(bufferedWriter, indentCnt + 2);
+                    bufferedWriter.write(String.format("Group %s : <non-existent>", i));
+                }
+            }
+
+            bufferedWriter.newLine();
+            bufferedWriter.flush();
+        }
+        catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 }

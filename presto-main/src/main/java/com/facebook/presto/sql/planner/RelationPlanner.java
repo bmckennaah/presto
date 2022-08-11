@@ -204,6 +204,16 @@ class RelationPlanner
     @Override
     protected RelationPlan visitAliasedRelation(AliasedRelation node, SqlPlannerContext context)
     {
+        if (session.getOptTrace().isPresent()) {
+            OptTrace optTrace = session.getOptTrace().get();
+
+            String locationString;
+            if (node.getLocation().isPresent()) {
+                locationString = optTrace.nodeLocationToString(node.getLocation().get());
+                optTrace.checkForDuplicateTableName(node.getAlias().getValue(), locationString, true);
+            }
+        }
+
         RelationPlan subPlan = process(node.getRelation(), context);
 
         PlanNode root = subPlan.getRoot();

@@ -19,6 +19,7 @@ import com.facebook.presto.Session;
 import com.facebook.presto.cost.CostComparator;
 import com.facebook.presto.cost.CostProvider;
 import com.facebook.presto.cost.PlanCostEstimate;
+import com.facebook.presto.cost.PlanNodeStatsEstimate;
 import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
@@ -35,9 +36,12 @@ import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.JoinDistributionType;
 import com.facebook.presto.sql.planner.CanonicalJoinNode;
 import com.facebook.presto.sql.planner.EqualityInference;
+import com.facebook.presto.sql.planner.OptTrace;
+import com.facebook.presto.sql.planner.OptTrace.Pair;
 import com.facebook.presto.sql.planner.VariablesExtractor;
 import com.facebook.presto.sql.planner.iterative.Lookup;
 import com.facebook.presto.sql.planner.iterative.Rule;
+import com.facebook.presto.sql.planner.optimizations.joins.JoinGraph;
 import com.facebook.presto.sql.planner.plan.JoinNode;
 import com.facebook.presto.sql.planner.plan.JoinNode.DistributionType;
 import com.facebook.presto.sql.planner.plan.JoinNode.EquiJoinClause;
@@ -135,7 +139,19 @@ public class ReorderJoins
     @Override
     public Result apply(JoinNode joinNode, Captures captures, Context context)
     {
-        MultiJoinNode multiJoinNode = toMultiJoinNode(joinNode, context.getLookup(), getMaxReorderedJoins(context.getSession()), functionResolution, determinismEvaluator);
+        OptTrace.trace(context.getOptTrace(), joinNode, 0, "ReorderJoins:apply initial join node :");
+
+        int maxReorderedJoins;
+        if (OptTrace.joinConstraintsPresent(context.getOptTrace())) {
+            OptTrace optTrace = context.getOptTrace().get();
+            maxReorderedJoins = optTrace.getTableScanCnt(joinNode);
+        }
+        else {
+            maxReorderedJoins = getMaxReorderedJoins(context.getSession());
+        }
+
+        MultiJoinNode multiJoinNode = toMultiJoinNode(joinNode, context.getLookup(), maxReorderedJoins, functionResolution, determinismEvaluator);
+
         JoinEnumerator joinEnumerator = new JoinEnumerator(
                 costComparator,
                 multiJoinNode.getFilter(),
@@ -143,10 +159,41 @@ public class ReorderJoins
                 determinismEvaluator,
                 functionResolution,
                 metadata);
+
+        List<JoinGraph> joinGraphList = JoinGraph.buildFromWithLookup(joinNode, context.getLookup());
+
+        if (context.getOptTrace().isPresent()) {
+            int cnt = 0;
+            OptTrace optTrace = context.getOptTrace().get();
+            optTrace.msg("All join graphs :", true);
+            optTrace.incrIndent(1);
+            for (JoinGraph joinGraph : joinGraphList) {
+                optTrace.msg("Join graph %d :", true, cnt);
+                optTrace.incrIndent(1);
+                optTrace.msgNoIndent("%s", true, joinGraph.toStringWithNames(optTrace.getIndent(), context.getLookup(), joinGraphList, joinNode));
+                optTrace.decrIndent(1);
+                ++cnt;
+            }
+            optTrace.decrIndent(1);
+        }
+
         JoinEnumerationResult result = joinEnumerator.chooseJoinOrder(multiJoinNode.getSources(), multiJoinNode.getOutputVariables());
+
+        OptTrace.trace(context.getOptTrace(), multiJoinNode.getSources(), 0, "Join Sources :");
+        OptTrace.traceEnumeratedJoins(context.getOptTrace(), joinNode, context.getCostProvider(), context.getStatsProvider(), 0, "All enumerated joins :");
+        if (result.getPlanNode().isPresent()) {
+            OptTrace.traceJoinConstraint(context.getOptTrace(), result.getPlanNode().get(), 0, "Final join constraint :");
+            result.trace(context.getOptTrace(), 0, "Enumerator chosen join order :", false);
+        }
+        else {
+            OptTrace.msg(context.getOptTrace(), "Final join constraint : <empty>", true);
+        }
+
         if (!result.getPlanNode().isPresent()) {
+            OptTrace.msg(context.getOptTrace(), "result is empty", true);
             return Result.empty();
         }
+
         return Result.ofPlanNode(result.getPlanNode().get());
     }
 
@@ -183,20 +230,69 @@ public class ReorderJoins
             this.logicalRowExpressions = new LogicalRowExpressions(determinismEvaluator, functionResolution, metadata.getFunctionAndTypeManager());
         }
 
+        private static void trace(Optional<OptTrace> optTraceParam, JoinEnumerationResult result,
+                int indentCnt, String msgString, Object... args)
+        {
+            if (optTraceParam.isPresent()) {
+                result.trace(optTraceParam, indentCnt, msgString, true);
+            }
+        }
+
+        private static void trace(Optional<OptTrace> optTraceParam, List<JoinEnumerationResult> results,
+                int indentCnt, String msgString, Object... args)
+        {
+            if (optTraceParam.isPresent()) {
+                optTraceParam.ifPresent(optTrace -> optTrace.incrIndent(indentCnt));
+                if (msgString != null) {
+                    optTraceParam.ifPresent(optTrace -> optTrace.msg(msgString, true, args));
+                    optTraceParam.ifPresent(optTrace -> optTrace.incrIndent(1));
+                }
+
+                if (!results.isEmpty()) {
+                    int cnt = 0;
+                    for (JoinEnumerationResult nextResult : results) {
+                        nextResult.trace(optTraceParam, 0, "Result %d :", true, cnt);
+                        ++cnt;
+                    }
+                }
+                else {
+                    optTraceParam.ifPresent(optTrace -> optTrace.msg("Empty.", true, args));
+                }
+
+                if (msgString != null) {
+                    optTraceParam.ifPresent(optTrace -> optTrace.decrIndent(1));
+                }
+
+                optTraceParam.ifPresent(optTrace -> optTrace.decrIndent(indentCnt));
+            }
+        }
+
         private JoinEnumerationResult chooseJoinOrder(LinkedHashSet<PlanNode> sources, List<VariableReferenceExpression> outputVariables)
         {
             context.checkTimeoutNotExhausted();
+            OptTrace.begin(context.getOptTrace(), "chooseJoinOrder");
+            OptTrace.trace(context.getOptTrace(), sources, 0, "Join Sources :");
 
             Set<PlanNode> multiJoinKey = ImmutableSet.copyOf(sources);
             JoinEnumerationResult bestResult = memo.get(multiJoinKey);
+
             if (bestResult == null) {
+                OptTrace.msg(context.getOptTrace(), "No result in memo. Will enumerate.", true);
                 checkState(sources.size() > 1, "sources size is less than or equal to one");
                 ImmutableList.Builder<JoinEnumerationResult> resultBuilder = ImmutableList.builder();
                 Set<Set<Integer>> partitions = generatePartitions(sources.size());
                 for (Set<Integer> partition : partitions) {
+                    OptTrace.begin(context.getOptTrace(), "createJoinAccordingToPartitioning");
+                    OptTrace.trace(context.getOptTrace(), partition, "Next partition %d-way : ", sources.size());
+
                     JoinEnumerationResult result = createJoinAccordingToPartitioning(sources, outputVariables, partition);
+
+                    OptTrace.end(context.getOptTrace(), "createJoinAccordingToPartitioning");
+                    result.trace(context.getOptTrace(), 0, "Next enumerated join :", true);
+
                     if (result.equals(UNKNOWN_COST_RESULT)) {
                         memo.put(multiJoinKey, result);
+                        OptTrace.end(context.getOptTrace(), "chooseJoinOrder");
                         return result;
                     }
                     if (!result.equals(INFINITE_COST_RESULT)) {
@@ -205,16 +301,37 @@ public class ReorderJoins
                 }
 
                 List<JoinEnumerationResult> results = resultBuilder.build();
+
+                if (this.session.getOptTrace().isPresent() && results.size() > 1) {
+                    OptTrace optTrace = this.session.getOptTrace().get();
+                    JoinEnumerationResult minResult = resultComparator.min(results);
+
+                    for (JoinEnumerationResult currentResult : results) {
+                        if (currentResult != minResult) {
+                            optTrace.addPrunedJoinId(optTrace.getJoinId(currentResult.getPlanNode().get()), OptTrace.PruneReason.COST);
+                        }
+                    }
+                }
+
+                trace(context.getOptTrace(), results, 0, "All results :");
+
                 if (results.isEmpty()) {
                     memo.put(multiJoinKey, INFINITE_COST_RESULT);
+                    OptTrace.end(context.getOptTrace(), "chooseJoinOrder");
                     return INFINITE_COST_RESULT;
                 }
 
                 bestResult = resultComparator.min(results);
                 memo.put(multiJoinKey, bestResult);
             }
+            else {
+                OptTrace.msg(context.getOptTrace(), "Found best result in memo.", true);
+            }
+
+            bestResult.trace(context.getOptTrace(), 1, "Best result :", true);
 
             bestResult.planNode.ifPresent((planNode) -> log.debug("Least cost join was: %s", planNode));
+            OptTrace.end(context.getOptTrace(), "chooseJoinOrder");
             return bestResult;
         }
 
@@ -250,6 +367,11 @@ public class ReorderJoins
             LinkedHashSet<PlanNode> rightSources = sources.stream()
                     .filter(source -> !leftSources.contains(source))
                     .collect(toCollection(LinkedHashSet::new));
+
+            OptTrace.trace(context.getOptTrace(), sources, 1, "Sources %d-way :", sources.size());
+            OptTrace.trace(context.getOptTrace(), leftSources, 1, "Left Sources %d-way :", leftSources.size());
+            OptTrace.trace(context.getOptTrace(), rightSources, 1, "Right Sources %d-way :", rightSources.size());
+
             return createJoin(leftSources, rightSources, outputVariables);
         }
 
@@ -267,7 +389,8 @@ public class ReorderJoins
                     .filter(JoinEnumerator::isJoinEqualityCondition)
                     .map(predicate -> toEquiJoinClause((CallExpression) predicate, leftVariables, context.getVariableAllocator()))
                     .collect(toImmutableList());
-            if (joinConditions.isEmpty()) {
+            if (joinConditions.isEmpty() && !OptTrace.joinConstraintsPresent(context.getOptTrace())) {
+                OptTrace.msg(context.getOptTrace(), "No join conditions and no join constraints. Join cost is infinite.", true);
                 return INFINITE_COST_RESULT;
             }
             List<RowExpression> joinFilters = joinPredicates.stream()
@@ -284,10 +407,17 @@ public class ReorderJoins
                     requiredJoinVariables.stream()
                             .filter(leftVariables::contains)
                             .collect(toImmutableList()));
-            if (leftResult.equals(UNKNOWN_COST_RESULT)) {
+            leftResult.trace(context.getOptTrace(), 0, "Left result :", true);
+
+            boolean leftSatisfiesConstraint = false;
+            if (context.getOptTrace().isPresent() && leftResult.getPlanNode().isPresent()) {
+                leftSatisfiesConstraint = OptTrace.satisfiesAnyJoinConstraint(session.getOptTrace(), leftResult.getPlanNode().get());
+            }
+
+            if (leftResult.equals(UNKNOWN_COST_RESULT) && !leftSatisfiesConstraint) {
                 return UNKNOWN_COST_RESULT;
             }
-            if (leftResult.equals(INFINITE_COST_RESULT)) {
+            if (leftResult.equals(INFINITE_COST_RESULT) && !leftSatisfiesConstraint) {
                 return INFINITE_COST_RESULT;
             }
 
@@ -298,10 +428,16 @@ public class ReorderJoins
                     requiredJoinVariables.stream()
                             .filter(rightVariables::contains)
                             .collect(toImmutableList()));
-            if (rightResult.equals(UNKNOWN_COST_RESULT)) {
+            rightResult.trace(context.getOptTrace(), 0, "Right result :", true);
+
+            boolean rightSatisfiesConstraint = false;
+            if (context.getOptTrace().isPresent() && rightResult.getPlanNode().isPresent()) {
+                rightSatisfiesConstraint = OptTrace.satisfiesAnyJoinConstraint(session.getOptTrace(), rightResult.getPlanNode().get());
+            }
+            if (rightResult.equals(UNKNOWN_COST_RESULT) && !rightSatisfiesConstraint) {
                 return UNKNOWN_COST_RESULT;
             }
-            if (rightResult.equals(INFINITE_COST_RESULT)) {
+            if (rightResult.equals(INFINITE_COST_RESULT) && !rightSatisfiesConstraint) {
                 return INFINITE_COST_RESULT;
             }
 
@@ -394,24 +530,76 @@ public class ReorderJoins
 
         private JoinEnumerationResult setJoinNodeProperties(JoinNode joinNode)
         {
+            OptTrace.begin(this.session.getOptTrace(), "setJoinNodeProperties");
+
             // TODO avoid stat (but not cost) recalculation for all considered (distribution,flip) pairs, since resulting relation is the same in all case
             if (isAtMostScalar(joinNode.getRight(), lookup)) {
+                OptTrace.msg(this.session.getOptTrace(), "Right is scalar so distribution is REPLICATED", true);
+                OptTrace.end(this.session.getOptTrace(), "setJoinNodeProperties");
                 return createJoinEnumerationResult(joinNode.withDistributionType(REPLICATED));
             }
             if (isAtMostScalar(joinNode.getLeft(), lookup)) {
+                OptTrace.msg(this.session.getOptTrace(), "Left is scalar so distribution is REPLICATED", true);
+                OptTrace.end(this.session.getOptTrace(), "setJoinNodeProperties");
                 return createJoinEnumerationResult(joinNode.flipChildren().withDistributionType(REPLICATED));
             }
             List<JoinEnumerationResult> possibleJoinNodes = getPossibleJoinNodes(joinNode, getJoinDistributionType(session));
             verify(!possibleJoinNodes.isEmpty(), "possibleJoinNodes is empty");
+
+            trace(context.getOptTrace(), possibleJoinNodes, 1, "Possible joins :");
+
             if (possibleJoinNodes.stream().anyMatch(UNKNOWN_COST_RESULT::equals)) {
+                OptTrace.msg(this.session.getOptTrace(), "Result : <unknown cost>", true);
+                OptTrace.end(this.session.getOptTrace(), "setJoinNodeProperties");
                 return UNKNOWN_COST_RESULT;
             }
+
+            if (this.session.getOptTrace().isPresent() && possibleJoinNodes.size() > 1) {
+                OptTrace optTrace = this.session.getOptTrace().get();
+                JoinEnumerationResult minResult = resultComparator.min(possibleJoinNodes);
+                optTrace.incrIndent(1);
+                for (JoinEnumerationResult currentResult : possibleJoinNodes) {
+                    if (currentResult != minResult) {
+                        currentResult.trace(this.session.getOptTrace(), 1, "Next enumerated join (** PRUNED BY COST **) : :",
+                                true);
+
+                        if (currentResult.getPlanNode().isPresent()) {
+                            optTrace.addPrunedJoinId(optTrace.getJoinId(currentResult.getPlanNode().get()), OptTrace.PruneReason.COST);
+                        }
+                    }
+                }
+
+                optTrace.decrIndent(1);
+
+                minResult.trace(this.session.getOptTrace(), 1, "Result :", true);
+                OptTrace.end(this.session.getOptTrace(), "setJoinNodeProperties");
+            }
+
             return resultComparator.min(possibleJoinNodes);
         }
 
         private List<JoinEnumerationResult> getPossibleJoinNodes(JoinNode joinNode, JoinDistributionType distributionType)
         {
             checkArgument(joinNode.getType() == INNER, "unexpected join node type: %s", joinNode.getType());
+
+            if (joinNode.getCriteria().isEmpty() && joinNode.getType() == INNER) {
+                boolean joinOk = false;
+
+                if (OptTrace.joinConstraintsPresent(context.getOptTrace())) {
+                    if (OptTrace.satisfiesAnyJoinConstraint(context.getOptTrace(), joinNode, true)) {
+                        joinOk = true;
+                    }
+                    else if (OptTrace.satisfiesAnyJoinConstraint(context.getOptTrace(), joinNode.flipChildren(), true)) {
+                        joinOk = true;
+                    }
+                }
+
+                if (!joinOk) {
+                    OptTrace.msg(context.getOptTrace(), "No join conditions or matching constraint. Join cost is infinite.", true);
+                    List<JoinEnumerationResult> result = ImmutableList.of(INFINITE_COST_RESULT);
+                    return result;
+                }
+            }
 
             if (joinNode.isCrossJoin()) {
                 return getPossibleJoinNodes(joinNode, REPLICATED);
@@ -447,7 +635,19 @@ public class ReorderJoins
 
         private JoinEnumerationResult createJoinEnumerationResult(PlanNode planNode)
         {
-            return JoinEnumerationResult.createJoinEnumerationResult(Optional.of(planNode), costProvider.getCost(planNode));
+            OptTrace.addEnumeratedJoin(context.getOptTrace(), planNode);
+
+            JoinEnumerationResult result;
+            if (!OptTrace.valid(context.getOptTrace(), planNode)) {
+                //result = new JoinEnumerationResult(Optional.of(planNode), PlanCostEstimate.infinite());
+                result = INFINITE_COST_RESULT;
+            }
+            else {
+                result = JoinEnumerationResult.createJoinEnumerationResult(Optional.of(planNode), costProvider.getCost(planNode));
+                trace(context.getOptTrace(), result, 0, "Next valid result :");
+            }
+
+            return result;
         }
     }
 
@@ -612,7 +812,6 @@ public class ReorderJoins
     {
         public static final JoinEnumerationResult UNKNOWN_COST_RESULT = new JoinEnumerationResult(Optional.empty(), PlanCostEstimate.unknown());
         public static final JoinEnumerationResult INFINITE_COST_RESULT = new JoinEnumerationResult(Optional.empty(), PlanCostEstimate.infinite());
-
         private final Optional<PlanNode> planNode;
         private final PlanCostEstimate cost;
 
@@ -644,6 +843,64 @@ public class ReorderJoins
                 return INFINITE_COST_RESULT;
             }
             return new JoinEnumerationResult(planNode, cost);
+        }
+
+        private void trace(Optional<OptTrace> optTraceParam, int indentCnt, String msgString, boolean brief, Object... args)
+        {
+            if (optTraceParam.isPresent()) {
+                if (args != null) {
+                    msgString = String.format(msgString, args);
+                }
+
+                OptTrace optTrace = optTraceParam.get();
+
+                if (this.equals(INFINITE_COST_RESULT)) {
+                    msgString = msgString + " (infinite cost)";
+                    optTrace.msg(msgString, true);
+                }
+                else if (this.equals(UNKNOWN_COST_RESULT)) {
+                    msgString = msgString + " (unknown cost)";
+                    optTrace.msg(msgString, true);
+                }
+                else {
+                    Optional<PlanNode> nextPlanNode = this.getPlanNode();
+
+                    PlanNodeStatsEstimate stats = null;
+                    if (nextPlanNode.isPresent()) {
+                        PlanNode planNode = nextPlanNode.get();
+
+                        Pair<String, String> joinStrings = optTrace.getJoinStrings(planNode);
+
+                        requireNonNull(joinStrings, "join strings are null");
+                        msgString = msgString + " (" + joinStrings.getKey() + " , join id " + optTrace.getJoinId(planNode) +
+                                " , hash code " + joinStrings.getKey().hashCode() + ")";
+                        optTrace.msg(msgString, true);
+                        optTrace.incrIndent(1);
+
+                        optTrace.msg("Constraint : %s", true, joinStrings.getValue());
+                        optTrace.decrIndent(1);
+
+                        if (!brief) {
+                            optTrace.tracePlanNode(planNode, 1, "Plan :");
+                        }
+
+                        if (optTrace.statsProvider() != null) {
+                            stats = optTrace.statsProvider().getStats(planNode);
+                        }
+                    }
+                    else {
+                        optTrace.incrIndent(indentCnt);
+                        optTrace.msg("<no join present>", true);
+                        optTrace.decrIndent(indentCnt);
+                    }
+
+                    optTrace.tracePlanCostEstimate(this.getCost(), 1, "Estimated cost :");
+
+                    if (stats != null) {
+                        optTrace.tracePlanNodeStatsEstimate(stats, 1, "Estimated stats :");
+                    }
+                }
+            }
         }
     }
 }

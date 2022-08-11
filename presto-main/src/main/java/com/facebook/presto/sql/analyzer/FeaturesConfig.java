@@ -176,6 +176,7 @@ public class FeaturesConfig
     private Duration iterativeOptimizerTimeout = new Duration(3, MINUTES); // by default let optimizer wait a long time in case it retrieves some data from ConnectorMetadata
     private Duration queryAnalyzerTimeout = new Duration(3, MINUTES);
     private boolean enableDynamicFiltering;
+    private boolean enableOptimizerTrace;
     private int dynamicFilteringMaxPerDriverRowCount = 100;
     private DataSize dynamicFilteringMaxPerDriverSize = new DataSize(10, KILOBYTE);
     private int dynamicFilteringRangeRowLimitPerDriver;
@@ -1498,6 +1499,17 @@ public class FeaturesConfig
     public FeaturesConfig setEnableDynamicFiltering(boolean value)
     {
         this.enableDynamicFiltering = value;
+        return this;
+    }
+
+    public boolean isEnableOptimizerTrace()
+    {
+        return enableOptimizerTrace;
+    }
+
+    public FeaturesConfig setEnableOptimizerTrace(boolean value)
+    {
+        this.enableOptimizerTrace = value;
         return this;
     }
 

@@ -132,7 +132,13 @@ public class LogicalPlanner
 
     public PlanNode plan(Analysis analysis)
     {
-        return planStatement(analysis, analysis.getStatement());
+        OptTrace.begin(this.session.getOptTrace(), "LogicalPlanner.plan");
+
+        PlanNode root = planStatement(analysis, analysis.getStatement());
+
+        OptTrace.end(this.session.getOptTrace(), "LogicalPlanner.plan");
+
+        return root;
     }
 
     public PlanNode planStatement(Analysis analysis, Statement statement)
@@ -148,6 +154,7 @@ public class LogicalPlanner
                     Optional.empty());
             return new OutputNode(source.getSourceLocation(), idAllocator.getNextId(), source, ImmutableList.of("rows"), ImmutableList.of(variable));
         }
+
         return createOutputPlan(planStatementWithoutOutput(analysis, statement), analysis);
     }
 

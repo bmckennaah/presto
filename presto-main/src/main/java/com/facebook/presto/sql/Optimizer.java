@@ -30,6 +30,7 @@ import com.facebook.presto.spi.eventlistener.PlanOptimizerInformation;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.sql.parser.SqlParser;
+import com.facebook.presto.sql.planner.OptTrace;
 import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.sql.planner.PlannerUtils;
 import com.facebook.presto.sql.planner.TypeProvider;
@@ -102,6 +103,17 @@ public class Optimizer
 
     public Plan validateAndOptimizePlan(PlanNode root, PlanStage stage)
     {
+        OptTrace.begin(this.session.getOptTrace(), "validateAndOptimizePlan", stage.name());
+        OptTrace.clearCaches(this.session.getOptTrace());
+
+        if (this.session.getOptTrace().isPresent()) {
+            OptTrace optTrace = session.getOptTrace().get();
+            TypeProvider types = TypeProvider.viewOf(variableAllocator.getVariables());
+            optTrace.setTypeProvider(types);
+            optTrace.assignTraceIds(root, optTrace.analysis());
+            optTrace.tracePlanNode(root, 0, "Initial root : ");
+        }
+
         planChecker.validateIntermediatePlan(root, session, metadata, sqlParser, TypeProvider.viewOf(variableAllocator.getVariables()), warningCollector);
 
         boolean enableVerboseRuntimeStats = SystemSessionProperties.isVerboseRuntimeStatsEnabled(session);
@@ -111,8 +123,12 @@ public class Optimizer
                     throw new PrestoException(QUERY_PLANNING_TIMEOUT, String.format("The query optimizer exceeded the timeout of %s.", getQueryAnalyzerTimeout(session).toString()));
                 }
                 long start = System.nanoTime();
+
+                OptTrace.begin(this.session.getOptTrace(), "optimize (%s)", optimizer.getClass().getSimpleName());
                 PlanNode newRoot = optimizer.optimize(root, session, TypeProvider.viewOf(variableAllocator.getVariables()), variableAllocator, idAllocator, warningCollector);
                 requireNonNull(newRoot, format("%s returned a null plan", optimizer.getClass().getName()));
+                OptTrace.end(this.session.getOptTrace(), "optimize (%s)", optimizer.getClass().getSimpleName());
+
                 if (enableVerboseRuntimeStats) {
                     String optimizerName = optimizer.getClass().getSimpleName();
                     if (optimizer instanceof StatsRecordingPlanOptimizer) {
@@ -131,6 +147,10 @@ public class Optimizer
             // make sure we produce a valid plan after optimizations run. This is mainly to catch programming errors
             planChecker.validateFinalPlan(root, session, metadata, sqlParser, TypeProvider.viewOf(variableAllocator.getVariables()), warningCollector);
         }
+
+        OptTrace.trace(this.session.getOptTrace(), root, 0, "Final root : ");
+        OptTrace.traceJoinIdMap(this.session.getOptTrace(), 0, "Join id map : ");
+        OptTrace.end(this.session.getOptTrace(), "validateAndOptimizePlan", stage.name());
 
         TypeProvider types = TypeProvider.viewOf(variableAllocator.getVariables());
         return new Plan(root, types, computeStats(root, types));
