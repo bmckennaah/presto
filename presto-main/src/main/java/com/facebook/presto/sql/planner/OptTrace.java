@@ -2885,13 +2885,13 @@ public class OptTrace
             incrIndent(1);
         }
 
-        if (planCostEstimate == PlanCostEstimate.infinite()) {
+        if (planCostEstimate.equals(PlanCostEstimate.infinite())) {
             msg("<infinite>", true);
         }
-        else if (planCostEstimate == PlanCostEstimate.unknown()) {
+        else if (planCostEstimate.equals(PlanCostEstimate.unknown())) {
             msg("<unknown>", true);
         }
-        else if (planCostEstimate == PlanCostEstimate.zero()) {
+        else if (planCostEstimate.equals(PlanCostEstimate.zero())) {
             msg("<zero>", true);
         }
         else {
